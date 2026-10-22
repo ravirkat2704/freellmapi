@@ -284,6 +284,24 @@ function logDecision(row: DecisionModelRow, keyId: number | null, status: 'ok' |
   } catch (e) {
     console.error('Failed to log decision request:', e);
   }
+  // The per-key monthly caps (#1158) and GET /v1/usage read the
+  // key_monthly_usage ledger, which the requests_key_monthly_usage trigger
+  // feeds from `requests`. logDecision only wrote decision_requests, so a
+  // served decision reserved ESTIMATED_TOKENS, released the reservation, and
+  // settled NO spend — a capped key accrued no decision traffic and kept
+  // serving decisions past its cap while chat, embeddings, media, rerank
+  // (#1621/#1627), moderation (#1625) and search (#1648) all settled theirs
+  // here. request_type='decision' follows that precedent; decisions fire
+  // every routing turn, so this is the busiest of the non-chat surfaces.
+  try {
+    const client = getClientContext();
+    getDb().prepare(`
+      INSERT INTO requests (platform, model_id, key_id, status, input_tokens, output_tokens, latency_ms, error, request_type, client_ip, client_user_agent, client_agent)
+      VALUES (?, ?, ?, ?, ?, 0, ?, ?, 'decision', ?, ?, ?)
+    `).run(row.platform, row.model_id, keyId, status === 'ok' ? 'success' : 'error', inputTokens, latencyMs, error, client.ip, client.userAgent, client.agent ?? clientAgent);
+  } catch (e) {
+    console.error('Failed to log decision request to requests table:', e);
+  }
 }
 
 function coolDown(row: DecisionModelRow, keyId: number, e: DecisionError): void {
